@@ -1,27 +1,53 @@
 const std = @import("std");
 const print = std.debug.print;
+const Timer = std.time.Timer;
 
-fn checkSiteList(allocator: std.mem.Allocator, sites: std.ArrayList([]const u8)) !void {
-    for (sites.items) |site| {
-        _ = checkSite(allocator, site) catch |err| switch (err) {
-            error.UnknownHostName => {
-                print("Unknown hostname {s}", .{site});
-                return err;
-            },
-            else => return err,
+const SiteChecker = struct {
+    allocator: std.mem.Allocator,
+    siteList: std.ArrayList([]const u8),
+    timer: Timer,
+
+    pub fn init(alloc: std.mem.Allocator) !SiteChecker {
+        return SiteChecker{
+            .allocator = alloc,
+            .siteList = std.ArrayList([]const u8).init(alloc),
+            .timer = try Timer.start(),
         };
     }
-}
+
+    pub fn deinit(self: *SiteChecker) void {
+        self.siteList.deinit();
+    }
+
+    pub fn startCheckSiteList(self: *SiteChecker) !void {
+        for (self.siteList.items) |site| {
+            _ = self.checkSite(site) catch |err| switch (err) {
+                error.UnknownHostName => {
+                    print("Unknown hostname {s}", .{site});
+                    return err;
+                },
+                else => return err,
+            };
+        }
+    }
+
+    fn checkSite(self: *SiteChecker, site_url: []const u8) !u64 {
+        const start: u64 = self.timer.read();
+        print("Connecting to site: {s}...", .{site_url});
+        var stream = try std.net.tcpConnectToHost(self.allocator, site_url, 443);
+        defer stream.close();
+
+        const now: u64 = self.timer.lap();
+        const duration_in_ms: u64 = (now - start) / NS_IN_MS;
+
+        print("RTT: {d} ms\n", .{duration_in_ms});
+
+        return duration_in_ms;
+    }
+};
 
 // opens and closes a tcp socket to the given site_url
 // returns the response time in ms
-fn checkSite(allocator: std.mem.Allocator, site_url: []const u8) !u16 {
-    print("Connecting to site: {s}\n", .{site_url});
-    var stream = try std.net.tcpConnectToHost(allocator, site_url, 443);
-    defer stream.close();
-
-    return 69;
-}
 
 const NS_IN_MS = 1000000;
 const WAIT_TIME_MS = 5000;
@@ -31,15 +57,16 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var siteList = std.ArrayList([]const u8).init(allocator);
-    defer siteList.deinit();
+    var siteChecker = try SiteChecker.init(allocator);
+    defer siteChecker.deinit();
 
-    try siteList.append("tellmewhatyouwant.lol");
-    try siteList.append("reesep.com");
+    try siteChecker.siteList.append("tellmewhatyouwant.lol");
+    try siteChecker.siteList.append("reesep.com");
 
     while (true) {
         print("Checking sites....\n", .{});
-        try checkSiteList(allocator, siteList);
+
+        try siteChecker.startCheckSiteList();
         print("Waiting {d}ms for next check...\n", .{WAIT_TIME_MS});
         std.time.sleep(WAIT_TIME_MS * NS_IN_MS);
     }

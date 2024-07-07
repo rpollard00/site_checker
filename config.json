@@ -1,0 +1,13 @@
+{
+    "sites": [
+        {
+            "name": "reesep.com",
+            "port": "443"
+        },
+        {
+            "name": "tellmewhatyouwant.lol",
+            "port": "443"
+        }
+    ],
+    "pollingIntervalMs": "500"
+}

@@ -7,7 +7,11 @@
         {
             "name": "tellmewhatyouwant.lol",
             "port": "443"
+        },
+        {
+            "name": "111faketellmewhatyouwant.lol",
+            "port": "443"
         }
     ],
-    "pollingIntervalMs": "500"
+    "pollingIntervalMs": "5000"
 }

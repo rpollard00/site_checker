@@ -1,4 +1,5 @@
 const std = @import("std");
+const NetworkError = @import("network_error.zig");
 const json = std.json;
 const fs = std.fs;
 const mem = std.mem;
@@ -62,8 +63,8 @@ const SiteChecker = struct {
     pub fn pollSites(self: *SiteChecker) !void {
         for (self.sites.items) |site| {
             _ = self.checkSite(site.name, site.port) catch |err| {
-                if (recoverableNetworkErrorClassifier(err)) |recoverable_error| {
-                    try self.handleRecoverableNetworkError(site.name, recoverable_error);
+                if (NetworkError.errorClassifier(err)) |recoverable_error| {
+                    try self.handleSiteError(site.name, recoverable_error);
                 } else {
                     return err;
                 }
@@ -71,19 +72,7 @@ const SiteChecker = struct {
         }
     }
 
-    fn recoverableNetworkErrorToString(err: RecoverableNetworkError) []const u8 {
-        return switch (err) {
-            RecoverableNetworkError.UnknownHostName => "unknown hostname",
-            RecoverableNetworkError.ConnectionRefused => "connection refused",
-            RecoverableNetworkError.ConnectionTimedOut => "connection timed out",
-            RecoverableNetworkError.ConnectionResetByPeer => "connection reset by peer",
-            RecoverableNetworkError.NameServerFailure => "nameserver failure",
-            RecoverableNetworkError.TemporaryNameServerFailure => "temporary nameserver failure",
-            RecoverableNetworkError.NetworkUnreachable => "network unreachable",
-        };
-    }
-
-    fn handleRecoverableNetworkError(self: *SiteChecker, site: []const u8, err: RecoverableNetworkError) !void {
+    fn handleSiteError(self: *SiteChecker, site: []const u8, err: NetworkError.Recoverable) !void {
         const MAX_MESSAGE_LEN = 1024;
         var buf: [MAX_MESSAGE_LEN]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buf);
@@ -91,7 +80,7 @@ const SiteChecker = struct {
         defer discordMessage.deinit();
 
         const writer = discordMessage.writer();
-        writer.print("ALERT! {s}: {s}\n", .{ site, recoverableNetworkErrorToString(err) }) catch |e| switch (e) {
+        writer.print("ALERT! {s}: {s}\n", .{ site, NetworkError.toString(err) }) catch |e| switch (e) {
             error.OutOfMemory => {
                 try writer.print("Alert message exceeded buffer.\n", .{});
             },
@@ -104,8 +93,8 @@ const SiteChecker = struct {
 
     fn checkSite(self: *SiteChecker, site_addr: []const u8, site_port: u16) !u64 {
         const start: u64 = self.timer.read();
-        print("Polling {s}...", .{site_addr});
 
+        print("Polling {s}...", .{site_addr});
         errdefer print("\n", .{});
 
         var stream = try net.tcpConnectToHost(self.allocator, site_addr, site_port);
@@ -120,29 +109,6 @@ const SiteChecker = struct {
         return duration_in_ms;
     }
 };
-
-const RecoverableNetworkError = error{
-    ConnectionRefused,
-    NetworkUnreachable,
-    ConnectionTimedOut,
-    ConnectionResetByPeer,
-    UnknownHostName,
-    TemporaryNameServerFailure,
-    NameServerFailure,
-};
-
-pub fn recoverableNetworkErrorClassifier(err: anyerror) ?RecoverableNetworkError {
-    return switch (err) {
-        error.ConnectionRefused => RecoverableNetworkError.ConnectionRefused,
-        error.NetworkUnreachable => RecoverableNetworkError.NetworkUnreachable,
-        error.ConnectionTimedOut => RecoverableNetworkError.ConnectionTimedOut,
-        error.ConnectionResetByPeer => RecoverableNetworkError.ConnectionResetByPeer,
-        error.UnknownHostName => RecoverableNetworkError.UnknownHostName,
-        error.TemporaryNameServerFailure => RecoverableNetworkError.TemporaryNameServerFailure,
-        error.NameServerFailure => RecoverableNetworkError.NameServerFailure,
-        else => null,
-    };
-}
 
 pub fn sendDiscordAlert(url: []const u8, message: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(heap.page_allocator);

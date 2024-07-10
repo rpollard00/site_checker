@@ -26,6 +26,71 @@ const Config = struct {
     pollingIntervalMs: u64,
 };
 
+const AlertEvent = struct {
+    // site: []const u8,
+    // err: NetworkError.Recoverable,
+    message: []const u8,
+};
+
+const AlertListener = union(enum) {
+    discordListener: DiscordListener,
+
+    pub fn invoke(self: AlertListener, event: AlertEvent) !void {
+        switch (self) {
+            inline else => |*listener| try listener.invoke(event),
+        }
+    }
+
+    pub fn deinit(self: AlertListener) void {
+        switch (self) {
+            inline else => |*listener| listener.deinit(),
+        }
+    }
+};
+
+const DiscordListener = struct {
+    allocator: std.mem.Allocator,
+    webhook: []const u8,
+
+    pub fn init(allocator: std.mem.Allocator) !DiscordListener {
+        return DiscordListener{
+            .allocator = allocator,
+            .webhook = try std.process.getEnvVarOwned(allocator, "DISCORD_WEBHOOK"),
+        };
+    }
+
+    pub fn deinit(self: *const DiscordListener) void {
+        self.allocator.destroy(&self.webhook);
+    }
+
+    pub fn invoke(self: *const DiscordListener, event: AlertEvent) !void {
+        print("Invoked the discord alerter\n", .{});
+        var arena = std.heap.ArenaAllocator.init(heap.page_allocator);
+        defer arena.deinit();
+
+        const alert_message = .{ .content = event.message };
+
+        var payload = ArrayList(u8).init(arena.allocator());
+        try json.stringify(alert_message, .{}, payload.writer());
+
+        var client = http.Client{ .allocator = arena.allocator() };
+
+        const result = try http.Client.fetch(
+            &client,
+            .{
+                .location = .{ .url = self.webhook },
+                .headers = .{ .content_type = .{ .override = "application/json" } },
+                .method = .POST,
+                .payload = payload.items,
+            },
+        );
+
+        if (@intFromEnum(result.status) > 400 and @intFromEnum(result.status) < 599) {
+            print("Failed to send discord alert. Http status code {d}\n", .{result.status});
+        }
+    }
+};
+
 pub fn loadConfigFile(alloc: mem.Allocator, config_file: []const u8) !json.Parsed(Config) {
     const max_config_size = 2000;
 
@@ -42,22 +107,35 @@ const SiteChecker = struct {
     allocator: mem.Allocator,
     sites: ArrayList(Site),
     timer: Timer,
-    discordWebhook: []const u8,
+    alert_listeners: ArrayList(AlertListener),
 
     pub fn init(alloc: mem.Allocator) !SiteChecker {
-        const webhook = try std.process.getEnvVarOwned(alloc, "DISCORD_WEBHOOK");
-        print("Webhook is {s}\n", .{webhook});
-
         return SiteChecker{
             .allocator = alloc,
             .sites = ArrayList(Site).init(alloc),
+            .alert_listeners = ArrayList(AlertListener).init(alloc),
             .timer = try Timer.start(),
-            .discordWebhook = webhook,
         };
+    }
+
+    pub fn addAlertListener(self: *SiteChecker, listener: anytype) !void {
+        const listener_type = @TypeOf(listener);
+        const listener_enum_fields = @typeInfo(AlertListener).Union.fields;
+
+        inline for (listener_enum_fields) |field| {
+            if (field.type == listener_type) {
+                try self.alert_listeners.append(@unionInit(AlertListener, field.name, listener));
+                return;
+            }
+        }
+
+        @compileError("Unsupported listener type: " ++ @typeName(listener_type));
     }
 
     pub fn deinit(self: *SiteChecker) void {
         self.sites.deinit();
+        for (self.alert_listeners.items) |listener| listener.deinit();
+        self.alert_listeners.deinit();
     }
 
     pub fn pollSites(self: *SiteChecker) !void {
@@ -88,7 +166,9 @@ const SiteChecker = struct {
         };
 
         print("{s}", .{discordMessage.items});
-        try sendDiscordAlert(self.discordWebhook, discordMessage.items);
+        //
+        // invoke the alert listeners here
+        for (self.alert_listeners.items) |listener| try listener.invoke(AlertEvent{ .message = discordMessage.items });
     }
 
     fn checkSite(self: *SiteChecker, site_addr: []const u8, site_port: u16) !u64 {
@@ -110,28 +190,6 @@ const SiteChecker = struct {
     }
 };
 
-pub fn sendDiscordAlert(url: []const u8, message: []const u8) !void {
-    var arena = std.heap.ArenaAllocator.init(heap.page_allocator);
-    defer arena.deinit();
-
-    const discordMessage = .{ .content = message };
-
-    var payload = ArrayList(u8).init(arena.allocator());
-    try json.stringify(discordMessage, .{}, payload.writer());
-
-    var client = http.Client{ .allocator = arena.allocator() };
-
-    _ = try http.Client.fetch(
-        &client,
-        .{
-            .location = .{ .url = url },
-            .headers = .{ .content_type = .{ .override = "application/json" } },
-            .method = .POST,
-            .payload = payload.items,
-        },
-    );
-}
-
 pub fn main() !void {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -144,6 +202,9 @@ pub fn main() !void {
 
     var siteChecker = try SiteChecker.init(allocator);
     defer siteChecker.deinit();
+
+    const discordListener = try DiscordListener.init(allocator);
+    try siteChecker.addAlertListener(discordListener);
 
     for (config.sites) |site| try siteChecker.sites.append(site);
 

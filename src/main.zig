@@ -19,6 +19,13 @@ const NS_IN_MS = 1000000;
 const Site = struct {
     name: []const u8,
     port: u16 = 443, // use 443 as a default
+    threshold: u16 = 10,
+    current_failures: u16 = 0,
+};
+
+const SiteState = struct {
+    is_failed: bool,
+    current_failures: u16,
 };
 
 const Config = struct {
@@ -108,12 +115,14 @@ const SiteChecker = struct {
     sites: ArrayList(Site),
     timer: Timer,
     alert_listeners: ArrayList(AlertListener),
+    sites_state: std.StringHashMap(SiteState),
 
     pub fn init(alloc: mem.Allocator) !SiteChecker {
         return SiteChecker{
             .allocator = alloc,
             .sites = ArrayList(Site).init(alloc),
             .alert_listeners = ArrayList(AlertListener).init(alloc),
+            .sites_state = std.StringHashMap(SiteState).init(alloc),
             .timer = try Timer.start(),
         };
     }
@@ -140,38 +149,47 @@ const SiteChecker = struct {
 
     pub fn pollSites(self: *SiteChecker) !void {
         for (self.sites.items) |site| {
-            _ = self.checkSite(site.name, site.port) catch |err| {
+            const siteState: *SiteState = self.sites_state.getPtr(site.name) orelse return error.NullPointerReference;
+
+            const rtt = self.checkSite(site.name, site.port) catch |err| {
                 if (NetworkError.errorClassifier(err)) |recoverable_error| {
-                    try self.handleSiteError(site.name, recoverable_error);
+                    siteState.*.current_failures += 1;
+                    if (siteState.*.current_failures > site.threshold) {
+                        try self.sendSiteAlert(site, recoverable_error);
+                    }
+                    break;
                 } else {
                     return err;
                 }
             };
+
+            if (rtt != null) {
+                siteState.*.current_failures = 0;
+            }
         }
     }
 
-    fn handleSiteError(self: *SiteChecker, site: []const u8, err: NetworkError.Recoverable) !void {
+    fn sendSiteAlert(self: *SiteChecker, site: Site, err: NetworkError.Recoverable) !void {
         const MAX_MESSAGE_LEN = 1024;
         var buf: [MAX_MESSAGE_LEN]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buf);
-        var discordMessage = try ArrayList(u8).initCapacity(fba.allocator(), MAX_MESSAGE_LEN);
-        defer discordMessage.deinit();
+        var alertMessage = try ArrayList(u8).initCapacity(fba.allocator(), MAX_MESSAGE_LEN);
+        defer alertMessage.deinit();
 
-        const writer = discordMessage.writer();
-        writer.print("ALERT! {s}: {s}\n", .{ site, NetworkError.toString(err) }) catch |e| switch (e) {
+        const writer = alertMessage.writer();
+        writer.print("ALERT! {s}: {s}\n", .{ site.name, NetworkError.toString(err) }) catch |e| switch (e) {
             error.OutOfMemory => {
                 try writer.print("Alert message exceeded buffer.\n", .{});
             },
             else => return e,
         };
 
-        print("{s}", .{discordMessage.items});
-        //
+        print("{s}", .{alertMessage.items});
         // invoke the alert listeners here
-        for (self.alert_listeners.items) |listener| try listener.invoke(AlertEvent{ .message = discordMessage.items });
+        for (self.alert_listeners.items) |listener| try listener.invoke(AlertEvent{ .message = alertMessage.items });
     }
 
-    fn checkSite(self: *SiteChecker, site_addr: []const u8, site_port: u16) !u64 {
+    fn checkSite(self: *SiteChecker, site_addr: []const u8, site_port: u16) !?u64 {
         const start: u64 = self.timer.read();
 
         print("Polling {s}...", .{site_addr});
@@ -206,7 +224,13 @@ pub fn main() !void {
     const discordListener = try DiscordListener.init(allocator);
     try siteChecker.addAlertListener(discordListener);
 
-    for (config.sites) |site| try siteChecker.sites.append(site);
+    for (config.sites) |site| {
+        try siteChecker.sites.append(site);
+        try siteChecker.sites_state.put(site.name, SiteState{
+            .current_failures = 0,
+            .is_failed = false,
+        });
+    }
 
     print("Starting site checker with an interval of {d}ms\n", .{config.pollingIntervalMs});
     while (true) {

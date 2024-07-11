@@ -2,15 +2,18 @@
     "sites": [
         {
             "name": "reesep.com",
-            "port": "443"
+            "port": "443",
+            "threshold": "5"
         },
         {
             "name": "tellmewhatyouwant.lol",
-            "port": "443"
+            "port": "443",
+            "threshold": "5"
         },
         {
             "name": "111faketellmewhatyouwant.lol",
-            "port": "443"
+            "port": "443",
+            "threshold": "5"
         }
     ],
     "pollingIntervalMs": "5000"

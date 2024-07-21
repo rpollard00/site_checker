@@ -86,20 +86,20 @@ const Controller = struct {
         self.* = undefined;
     }
 
-    pub fn receiveResult(self: *Controller, result: ActionResult) void {
-        self.results.enqueue(result);
+    pub fn receiveResult(self: *Controller, result: ActionResult) !void {
+        try self.results.enqueue(result);
+        self.resultHandler();
     }
 
     pub fn resultHandler(self: *Controller) void {
-        while (true) {
-            // print("I'm doing something\n" .{});
-            if (self.results.peek() != null) {
-                const currentResult = self.results.dequeue() catch {
-                    return;
-                };
-                print("HANDLED: {s}: {}\n", .{ currentResult.who, currentResult.what });
-            }
+        // print("I'm doing something\n" .{});
+        if (self.results.peek() != null) {
+            const currentResult = self.results.dequeue() catch {
+                return;
+            };
+            print("HANDLED: {s}: {}\n", .{ currentResult.who, currentResult.what });
         }
+        std.time.sleep(1000 * NS_IN_MS);
     }
 };
 
@@ -107,14 +107,14 @@ const SiteChecker = struct {
     allocator: mem.Allocator,
     site: Site,
     timer: Timer,
-    result_handler: *queue.Queue(ActionResult),
+    result_handler: *Controller,
     // do we need a pointer to the result queue
     // do we handle our own timing here
 
     pub fn init(
         alloc: mem.Allocator,
         site: Site,
-        result_handler: *queue.Queue(ActionResult),
+        result_handler: *Controller,
     ) !SiteChecker {
         return SiteChecker{
             .allocator = alloc,
@@ -131,13 +131,13 @@ const SiteChecker = struct {
     fn checkSite(self: *SiteChecker) !?u64 {
         const start: u64 = self.timer.read();
 
-        print("Polling {s}...", .{self.site.name});
+        // print("Polling {s}...", .{self.site.name});
         errdefer print("\n", .{});
 
         var stream = net.tcpConnectToHost(self.allocator, self.site.name, self.site.port) catch |err| {
             if (NetworkError.errorClassifier(err)) |recoverable_error| {
-                print("ERROR: {!}\n", .{recoverable_error});
-                try self.result_handler.enqueue(ActionResult{ .who = self.site.name, .what = PollingResult.Error });
+                print("Polling {s}...ERROR: {!}\n", .{ self.site.name, recoverable_error });
+                try self.result_handler.receiveResult(ActionResult{ .who = self.site.name, .what = PollingResult.Error });
                 return @as(usize, 0);
                 // TODO: dispatch result with error
                 // try self.sendSiteAlert(site, recoverable_error);
@@ -153,8 +153,8 @@ const SiteChecker = struct {
 
         // TODO: dispatch successful result
 
-        try self.result_handler.enqueue(ActionResult{ .who = self.site.name, .what = PollingResult.Ok });
-        print("Success [RTT {d}ms]\n", .{duration_in_ms});
+        try self.result_handler.receiveResult(ActionResult{ .who = self.site.name, .what = PollingResult.Ok });
+        print("Polling {s}...Success [RTT {d}ms]\n", .{ self.site.name, duration_in_ms });
 
         return duration_in_ms;
     }
@@ -189,7 +189,7 @@ pub fn main() !void {
         const currentSite: SiteChecker = try SiteChecker.init(
             allocator,
             site,
-            &controller.results,
+            &controller,
         );
         try siteCheckers.append(currentSite);
     }

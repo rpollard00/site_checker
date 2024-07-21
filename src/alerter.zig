@@ -23,7 +23,7 @@ const AlertListener = union(enum) {
     }
 };
 
-const DiscordListener = struct {
+pub const DiscordListener = struct {
     allocator: std.mem.Allocator,
     webhook: []const u8,
 
@@ -103,7 +103,7 @@ pub const AlertListeners = struct {
 
         @compileError("Unsupported listener type: " ++ @typeName(listener_type));
     }
-    fn sendSiteAlert(self: *AlertListeners, site_name: []const u8, err: NetworkError.Recoverable) !void {
+    pub fn sendSiteAlert(self: *AlertListeners, site_name: []const u8, err_str: []const u8) !void {
         const MAX_MESSAGE_LEN = 1024;
         var buf: [MAX_MESSAGE_LEN]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buf);
@@ -111,7 +111,7 @@ pub const AlertListeners = struct {
         defer alertMessage.deinit();
 
         const writer = alertMessage.writer();
-        writer.print("ALERT! {s}: {s}\n", .{ site_name, NetworkError.toString(err) }) catch |e| switch (e) {
+        writer.print("ALERT! {s}: {s}\n", .{ site_name, err_str }) catch |e| switch (e) {
             error.OutOfMemory => {
                 try writer.print("Alert message exceeded buffer.\n", .{});
             },

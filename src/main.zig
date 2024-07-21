@@ -81,12 +81,16 @@ const Controller = struct {
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
 
-    pub fn init(allocator: std.mem.Allocator) Controller {
+    pub fn init(allocator: std.mem.Allocator) !Controller {
+        const discord_listener = try alerter.DiscordListener.init(allocator);
+        var alert_listeners = alerter.AlertListeners.init(allocator);
+        try alert_listeners.addAlertListener(discord_listener);
+
         const mutex = std.Thread.Mutex{};
         return Controller{
             .allocator = allocator,
             .results = queue.Queue(ActionResult).init(allocator, mutex),
-            .alerter = alerter.AlertListeners.init(allocator),
+            .alerter = alert_listeners,
             .mutex = mutex,
             .cond = std.Thread.Condition{},
         };
@@ -121,8 +125,16 @@ const Controller = struct {
                 continue;
             }
 
+            defer currentResult.?.deinit(self.allocator);
+
             print("HANDLED: {s}: {} -> {s}\n", .{ currentResult.?.who, currentResult.?.what, currentResult.?.msg });
-            currentResult.?.deinit(self.allocator);
+
+            if (currentResult.?.what != PollingResult.Ok) {
+                self.alerter.sendSiteAlert(currentResult.?.who, currentResult.?.msg) catch |err| {
+                    print("Error sending site alert...{!}\n", .{err});
+                    continue;
+                };
+            }
         }
     }
 };
@@ -204,7 +216,7 @@ pub fn main() !void {
 
     const config = parsedConfig.value;
 
-    var controller = Controller.init(allocator);
+    var controller = try Controller.init(allocator);
     defer controller.deinit();
 
     var siteCheckers: ArrayList(SiteChecker) = ArrayList(SiteChecker).init(allocator);

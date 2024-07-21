@@ -1,5 +1,7 @@
 const std = @import("std");
 const NetworkError = @import("network_error.zig");
+const queue = @import("../../eventually/src/queue.zig");
+const alerter = @import("alerter.zig");
 const json = std.json;
 const fs = std.fs;
 const mem = std.mem;
@@ -21,6 +23,7 @@ const Site = struct {
     port: u16 = 443, // use 443 as a default
     threshold: u16 = 10,
     current_failures: u16 = 0,
+    polling_interval: u64 = 5000, // interval in ms
 };
 
 const SiteState = struct {
@@ -33,69 +36,23 @@ const Config = struct {
     pollingIntervalMs: u64,
 };
 
-const AlertEvent = struct {
-    // site: []const u8,
-    // err: NetworkError.Recoverable,
-    message: []const u8,
+const ActionResult = struct {
+    who: []const u8,
+    what: PollingResult,
 };
 
-const AlertListener = union(enum) {
-    discordListener: DiscordListener,
-
-    pub fn invoke(self: AlertListener, event: AlertEvent) !void {
-        switch (self) {
-            inline else => |*listener| try listener.invoke(event),
-        }
-    }
-
-    pub fn deinit(self: AlertListener) void {
-        switch (self) {
-            inline else => |*listener| listener.deinit(),
-        }
-    }
+const Event = struct {
+    action: EventAction,
+    site_ptr: *Site,
 };
 
-const DiscordListener = struct {
-    allocator: std.mem.Allocator,
-    webhook: []const u8,
+const EventAction = enum {
+    Poll,
+};
 
-    pub fn init(allocator: std.mem.Allocator) !DiscordListener {
-        return DiscordListener{
-            .allocator = allocator,
-            .webhook = try std.process.getEnvVarOwned(allocator, "DISCORD_WEBHOOK"),
-        };
-    }
-
-    pub fn deinit(self: *const DiscordListener) void {
-        self.allocator.destroy(&self.webhook);
-    }
-
-    pub fn invoke(self: *const DiscordListener, event: AlertEvent) !void {
-        print("Invoked the discord alerter\n", .{});
-        var arena = std.heap.ArenaAllocator.init(heap.page_allocator);
-        defer arena.deinit();
-
-        const alert_message = .{ .content = event.message };
-
-        var payload = ArrayList(u8).init(arena.allocator());
-        try json.stringify(alert_message, .{}, payload.writer());
-
-        var client = http.Client{ .allocator = arena.allocator() };
-
-        const result = try http.Client.fetch(
-            &client,
-            .{
-                .location = .{ .url = self.webhook },
-                .headers = .{ .content_type = .{ .override = "application/json" } },
-                .method = .POST,
-                .payload = payload.items,
-            },
-        );
-
-        if (@intFromEnum(result.status) > 400 and @intFromEnum(result.status) < 599) {
-            print("Failed to send discord alert. Http status code {d}\n", .{result.status});
-        }
-    }
+const PollingResult = enum {
+    Ok,
+    Error,
 };
 
 pub fn loadConfigFile(alloc: mem.Allocator, config_file: []const u8) !json.Parsed(Config) {
@@ -110,101 +67,80 @@ pub fn loadConfigFile(alloc: mem.Allocator, config_file: []const u8) !json.Parse
     return try json.parseFromSlice(Config, alloc, contents, .{ .allocate = .alloc_always });
 }
 
+const Controller = struct {
+    results: queue.Queue(ActionResult),
+    pub fn init(allocator: std.mem.Allocator) !Controller {
+        return Controller{ .queue = queue.Queue(ActionResult).init(allocator) };
+    }
+
+    pub fn deinit(self: *Controller) void {
+        self.results.deinit();
+        self.* = undefined;
+    }
+
+    pub fn receiveResult(self: *Controller, result: ActionResult) void {
+        self.results.enqueue(result);
+    }
+
+    pub fn resultHandler(self: *Controller) !void {
+        while (true) {
+            if (self.results.peek() != null) {
+                const currentResult = try self.results.dequeue();
+                print("{s}: {s}", .{ currentResult.who, currentResult.what });
+            }
+        }
+    }
+};
+
 const SiteChecker = struct {
     allocator: mem.Allocator,
-    sites: ArrayList(Site),
+    site: Site,
     timer: Timer,
-    alert_listeners: ArrayList(AlertListener),
-    sites_state: std.StringHashMap(SiteState),
+    // do we need a pointer to the result queue
+    // do we handle our own timing here
 
-    pub fn init(alloc: mem.Allocator) !SiteChecker {
+    pub fn init(alloc: mem.Allocator, site: Site) !SiteChecker {
         return SiteChecker{
             .allocator = alloc,
-            .sites = ArrayList(Site).init(alloc),
-            .alert_listeners = ArrayList(AlertListener).init(alloc),
-            .sites_state = std.StringHashMap(SiteState).init(alloc),
+            .site = site,
             .timer = try Timer.start(),
         };
     }
 
-    pub fn addAlertListener(self: *SiteChecker, listener: anytype) !void {
-        const listener_type = @TypeOf(listener);
-        const listener_enum_fields = @typeInfo(AlertListener).Union.fields;
-
-        inline for (listener_enum_fields) |field| {
-            if (field.type == listener_type) {
-                try self.alert_listeners.append(@unionInit(AlertListener, field.name, listener));
-                return;
-            }
-        }
-
-        @compileError("Unsupported listener type: " ++ @typeName(listener_type));
-    }
-
-    pub fn deinit(self: *SiteChecker) void {
-        self.sites.deinit();
-        for (self.alert_listeners.items) |listener| listener.deinit();
-        self.alert_listeners.deinit();
-    }
-
-    pub fn pollSites(self: *SiteChecker) !void {
-        for (self.sites.items) |site| {
-            const siteState: *SiteState = self.sites_state.getPtr(site.name) orelse return error.NullPointerReference;
-
-            const rtt = self.checkSite(site.name, site.port) catch |err| {
-                if (NetworkError.errorClassifier(err)) |recoverable_error| {
-                    siteState.*.current_failures += 1;
-                    if (siteState.*.current_failures > site.threshold) {
-                        try self.sendSiteAlert(site, recoverable_error);
-                    }
-                    break;
-                } else {
-                    return err;
-                }
-            };
-
-            if (rtt != null) {
-                siteState.*.current_failures = 0;
-            }
-        }
-    }
-
-    fn sendSiteAlert(self: *SiteChecker, site: Site, err: NetworkError.Recoverable) !void {
-        const MAX_MESSAGE_LEN = 1024;
-        var buf: [MAX_MESSAGE_LEN]u8 = undefined;
-        var fba = std.heap.FixedBufferAllocator.init(&buf);
-        var alertMessage = try ArrayList(u8).initCapacity(fba.allocator(), MAX_MESSAGE_LEN);
-        defer alertMessage.deinit();
-
-        const writer = alertMessage.writer();
-        writer.print("ALERT! {s}: {s}\n", .{ site.name, NetworkError.toString(err) }) catch |e| switch (e) {
-            error.OutOfMemory => {
-                try writer.print("Alert message exceeded buffer.\n", .{});
-            },
-            else => return e,
-        };
-
-        print("{s}", .{alertMessage.items});
-        // invoke the alert listeners here
-        for (self.alert_listeners.items) |listener| try listener.invoke(AlertEvent{ .message = alertMessage.items });
-    }
-
-    fn checkSite(self: *SiteChecker, site_addr: []const u8, site_port: u16) !?u64 {
+    fn checkSite(self: *SiteChecker) !?u64 {
         const start: u64 = self.timer.read();
 
-        print("Polling {s}...", .{site_addr});
+        print("Polling {s}...", .{self.site.name});
         errdefer print("\n", .{});
 
-        var stream = try net.tcpConnectToHost(self.allocator, site_addr, site_port);
+        var stream = net.tcpConnectToHost(self.allocator, self.site.name, self.site.port) catch |err| {
+            if (NetworkError.errorClassifier(err)) |recoverable_error| {
+                print("ERROR: {!}\n", .{recoverable_error});
+                return @as(usize, 0);
+                // TODO: dispatch result with error
+                // try self.sendSiteAlert(site, recoverable_error);
+            } else {
+                return err;
+            }
+        };
 
         defer stream.close();
 
         const now: u64 = self.timer.lap();
         const duration_in_ms: u64 = (now - start) / NS_IN_MS;
 
+        // TODO: dispatch successful result
+
         print("Success [RTT {d}ms]\n", .{duration_in_ms});
 
         return duration_in_ms;
+    }
+
+    fn poll(self: *SiteChecker) !void {
+        while (true) {
+            _ = try self.checkSite();
+            std.time.sleep(self.site.polling_interval * NS_IN_MS);
+        }
     }
 };
 
@@ -218,25 +154,18 @@ pub fn main() !void {
 
     const config = parsedConfig.value;
 
-    var siteChecker = try SiteChecker.init(allocator);
-    defer siteChecker.deinit();
-
-    const discordListener = try DiscordListener.init(allocator);
-    try siteChecker.addAlertListener(discordListener);
+    var siteCheckers: ArrayList(SiteChecker) = ArrayList(SiteChecker).init(allocator);
+    defer siteCheckers.deinit();
 
     for (config.sites) |site| {
-        try siteChecker.sites.append(site);
-        try siteChecker.sites_state.put(site.name, SiteState{
-            .current_failures = 0,
-            .is_failed = false,
-        });
+        const currentSite: SiteChecker = try SiteChecker.init(allocator, site);
+        try siteCheckers.append(currentSite);
     }
 
-    print("Starting site checker with an interval of {d}ms\n", .{config.pollingIntervalMs});
-    while (true) {
-        try siteChecker.pollSites();
-        std.time.sleep(config.pollingIntervalMs * NS_IN_MS);
-    }
+    try siteCheckers.items[0].poll();
+    // for (siteCheckers.items) |*sc| {
+    //     _ = try sc.*.checkSite();
+    // }
 }
 
 const expect = std.testing.expect;

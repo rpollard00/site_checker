@@ -1,6 +1,6 @@
 const std = @import("std");
 const NetworkError = @import("network_error.zig");
-const queue = @import("../../eventually/src/queue.zig");
+const queue = @import("queue.zig");
 const alerter = @import("alerter.zig");
 const json = std.json;
 const fs = std.fs;
@@ -68,12 +68,20 @@ pub fn loadConfigFile(alloc: mem.Allocator, config_file: []const u8) !json.Parse
 }
 
 const Controller = struct {
+    allocator: std.mem.Allocator,
     results: queue.Queue(ActionResult),
-    pub fn init(allocator: std.mem.Allocator) !Controller {
-        return Controller{ .queue = queue.Queue(ActionResult).init(allocator) };
+    alerter: alerter.AlertListeners,
+
+    pub fn init(allocator: std.mem.Allocator) Controller {
+        return Controller{
+            .allocator = allocator,
+            .results = queue.Queue(ActionResult).init(allocator),
+            .alerter = alerter.AlertListeners.init(allocator),
+        };
     }
 
     pub fn deinit(self: *Controller) void {
+        self.alerter.deinit();
         self.results.deinit();
         self.* = undefined;
     }
@@ -82,11 +90,14 @@ const Controller = struct {
         self.results.enqueue(result);
     }
 
-    pub fn resultHandler(self: *Controller) !void {
+    pub fn resultHandler(self: *Controller) void {
         while (true) {
+            // print("I'm doing something\n" .{});
             if (self.results.peek() != null) {
-                const currentResult = try self.results.dequeue();
-                print("{s}: {s}", .{ currentResult.who, currentResult.what });
+                const currentResult = self.results.dequeue() catch {
+                    return;
+                };
+                print("HANDLED: {s}: {}\n", .{ currentResult.who, currentResult.what });
             }
         }
     }
@@ -96,15 +107,25 @@ const SiteChecker = struct {
     allocator: mem.Allocator,
     site: Site,
     timer: Timer,
+    result_handler: *queue.Queue(ActionResult),
     // do we need a pointer to the result queue
     // do we handle our own timing here
 
-    pub fn init(alloc: mem.Allocator, site: Site) !SiteChecker {
+    pub fn init(
+        alloc: mem.Allocator,
+        site: Site,
+        result_handler: *queue.Queue(ActionResult),
+    ) !SiteChecker {
         return SiteChecker{
             .allocator = alloc,
             .site = site,
+            .result_handler = result_handler,
             .timer = try Timer.start(),
         };
+    }
+
+    pub fn deinit(self: *SiteChecker) void {
+        self.allocator.destroy(self.result_handler);
     }
 
     fn checkSite(self: *SiteChecker) !?u64 {
@@ -116,6 +137,7 @@ const SiteChecker = struct {
         var stream = net.tcpConnectToHost(self.allocator, self.site.name, self.site.port) catch |err| {
             if (NetworkError.errorClassifier(err)) |recoverable_error| {
                 print("ERROR: {!}\n", .{recoverable_error});
+                try self.result_handler.enqueue(ActionResult{ .who = self.site.name, .what = PollingResult.Error });
                 return @as(usize, 0);
                 // TODO: dispatch result with error
                 // try self.sendSiteAlert(site, recoverable_error);
@@ -131,6 +153,7 @@ const SiteChecker = struct {
 
         // TODO: dispatch successful result
 
+        try self.result_handler.enqueue(ActionResult{ .who = self.site.name, .what = PollingResult.Ok });
         print("Success [RTT {d}ms]\n", .{duration_in_ms});
 
         return duration_in_ms;
@@ -154,16 +177,77 @@ pub fn main() !void {
 
     const config = parsedConfig.value;
 
+    // var resultQueue = queue.Queue(ActionResult).init(allocator);
+    // defer resultQueue.deinit();
+    var controller = Controller.init(allocator);
+    defer controller.deinit();
+
     var siteCheckers: ArrayList(SiteChecker) = ArrayList(SiteChecker).init(allocator);
     defer siteCheckers.deinit();
 
     for (config.sites) |site| {
-        const currentSite: SiteChecker = try SiteChecker.init(allocator, site);
+        const currentSite: SiteChecker = try SiteChecker.init(
+            allocator,
+            site,
+            &controller.results,
+        );
         try siteCheckers.append(currentSite);
     }
 
+    _ = try std.Thread.spawn(.{}, Controller.resultHandler, .{&controller});
+
     try siteCheckers.items[0].poll();
+
+    //
+
+    // var terminate = std.atomic.Value(bool);
+    //
+
+    std.time.sleep(10000 * NS_IN_MS);
+
+    // const ThreadContext = struct {
+    //     queue: *Queue(u32),
+    //     start_value: u32,
+    //     count: u32,
+    // };
+
+    // const thread_count = 4;
+    // const operations_per_thread = 1000;
+
+    // var queue = Queue(u32).init(std.testing.allocator);
+    // defer queue.deinit();
+
+    // var threads: [thread_count]std.Thread = undefined;
+    // var contexts: [thread_count]ThreadContext = undefined;
     // for (siteCheckers.items) |*sc| {
+    // const Runner = struct {
+    //     fn run(context: *ThreadContext) void {
+    //         var i: u32 = 0;
+    //         while (i < context.count) : (i += 1) {
+    //             const value: u32 = @intCast(context.start_value + i);
+    //             context.queue.enqueue(value) catch unreachable;
+    //         }
+
+    //         i = 0;
+    //         while (i < context.count) : (i += 1) {
+    //             _ = context.queue.dequeue() catch unreachable;
+    //         }
+    //     }
+    // };
+
+    // for (&threads, 0..) |*thread, i| {
+    //     contexts[i] = ThreadContext{
+    //         .queue = &queue,
+    //         .start_value = @intCast(i * operations_per_thread),
+    //         .count = operations_per_thread,
+    //     };
+
+    //     thread.* = try std.Thread.spawn(.{}, Runner.run, .{&contexts[i]});
+    // }
+
+    // for (threads) |thread| {
+    //     thread.join();
+    // }
     //     _ = try sc.*.checkSite();
     // }
 }

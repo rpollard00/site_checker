@@ -74,7 +74,7 @@ const DiscordListener = struct {
 
 // this is both building the alert and dispatching, i think we need to move building the alert to its own thing
 // we need to pick results off of the result queue, they should contain the resultAction, site, and nullable errorMessage
-const AlertListeners = struct {
+pub const AlertListeners = struct {
     allocator: std.mem.Allocator,
     alert_listeners: std.ArrayList(AlertListener),
 

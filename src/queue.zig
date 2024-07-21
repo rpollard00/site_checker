@@ -15,10 +15,10 @@ pub fn Queue(comptime T: type) type {
             next: ?*Node,
         };
 
-        pub fn init(alloc: std.mem.Allocator) Self {
+        pub fn init(alloc: std.mem.Allocator, mutex: std.Thread.Mutex) Self {
             return Self{
                 .allocator = alloc,
-                .mutex = Mutex{},
+                .mutex = mutex,
                 .head = null,
                 .tail = null,
                 .length = 0,
@@ -99,12 +99,14 @@ pub fn Queue(comptime T: type) type {
 }
 
 test "can make a queue" {
-    var queue = Queue(u16).init(std.testing.allocator);
+    const mutex = std.Thread.Mutex{};
+    var queue = Queue(u16).init(std.testing.allocator, mutex);
     defer queue.deinit();
 }
 
 test "can dequeue one node" {
-    var queue = Queue(u16).init(std.testing.allocator);
+    const mutex = std.Thread.Mutex{};
+    var queue = Queue(u16).init(std.testing.allocator, mutex);
     defer queue.deinit();
 
     const uhh1: u16 = 5;
@@ -116,7 +118,8 @@ test "can dequeue one node" {
 }
 
 test "can queue simple data" {
-    var queue = Queue(u16).init(std.testing.allocator);
+    const mutex = std.Thread.Mutex{};
+    var queue = Queue(u16).init(std.testing.allocator, mutex);
     defer queue.deinit();
 
     const uhh1: u16 = 5;
@@ -138,7 +141,8 @@ test "can queue simple data" {
 }
 
 test "can empty and refill queue and empty again" {
-    var queue = Queue(u16).init(std.testing.allocator);
+    const mutex = std.Thread.Mutex{};
+    var queue = Queue(u16).init(std.testing.allocator, mutex);
     defer queue.deinit();
 
     try queue.enqueue(5);
@@ -161,7 +165,8 @@ test "can empty and refill queue and empty again" {
 }
 
 test "expect length to be 5 after adding 5 elements" {
-    var queue = Queue(u16).init(std.testing.allocator);
+    const mutex = std.Thread.Mutex{};
+    var queue = Queue(u16).init(std.testing.allocator, mutex);
     defer queue.deinit();
 
     try queue.enqueue(1);
@@ -174,7 +179,8 @@ test "expect length to be 5 after adding 5 elements" {
 }
 
 test "expect length to be 3 after adding 5 elements and removing 2" {
-    var queue = Queue(u16).init(std.testing.allocator);
+    const mutex = std.Thread.Mutex{};
+    var queue = Queue(u16).init(std.testing.allocator, mutex);
     defer queue.deinit();
 
     try queue.enqueue(1);
@@ -190,7 +196,8 @@ test "expect length to be 3 after adding 5 elements and removing 2" {
 }
 
 test "can peek in the queue" {
-    var queue = Queue(u16).init(std.testing.allocator);
+    const mutex = std.Thread.Mutex{};
+    var queue = Queue(u16).init(std.testing.allocator, mutex);
     defer queue.deinit();
 
     try queue.enqueue(1);
@@ -211,6 +218,7 @@ test "can peek in the queue" {
 }
 
 test "multiple threads can access the queue" {
+    const mutex = std.Thread.Mutex{};
     const ThreadContext = struct {
         queue: *Queue(u32),
         start_value: u32,
@@ -220,7 +228,7 @@ test "multiple threads can access the queue" {
     const thread_count = 4;
     const operations_per_thread = 1000;
 
-    var queue = Queue(u32).init(std.testing.allocator);
+    var queue = Queue(u32).init(std.testing.allocator, mutex);
     defer queue.deinit();
 
     var threads: [thread_count]std.Thread = undefined;

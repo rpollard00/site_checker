@@ -71,12 +71,16 @@ const Controller = struct {
     allocator: std.mem.Allocator,
     results: queue.Queue(ActionResult),
     alerter: alerter.AlertListeners,
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
 
     pub fn init(allocator: std.mem.Allocator) Controller {
         return Controller{
             .allocator = allocator,
             .results = queue.Queue(ActionResult).init(allocator),
             .alerter = alerter.AlertListeners.init(allocator),
+            .mutex = std.Thread.Mutex{},
+            .cond = std.Thread.Condition{},
         };
     }
 
@@ -86,20 +90,29 @@ const Controller = struct {
         self.* = undefined;
     }
 
-    pub fn receiveResult(self: *Controller, result: ActionResult) !void {
+    pub fn dispatch(self: *Controller, result: ActionResult) !void {
         try self.results.enqueue(result);
-        self.resultHandler();
+
+        self.cond.signal();
     }
 
     pub fn resultHandler(self: *Controller) void {
-        // print("I'm doing something\n" .{});
-        if (self.results.peek() != null) {
+        while (true) {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            while (self.results.peek() == null) {
+                print("Waiting...\n", .{});
+                self.cond.wait(&self.mutex);
+            }
+
             const currentResult = self.results.dequeue() catch {
-                return;
+                print("Too many of these...\n", .{});
+                continue;
             };
+
             print("HANDLED: {s}: {}\n", .{ currentResult.who, currentResult.what });
         }
-        std.time.sleep(1000 * NS_IN_MS);
     }
 };
 
@@ -137,7 +150,7 @@ const SiteChecker = struct {
         var stream = net.tcpConnectToHost(self.allocator, self.site.name, self.site.port) catch |err| {
             if (NetworkError.errorClassifier(err)) |recoverable_error| {
                 print("Polling {s}...ERROR: {!}\n", .{ self.site.name, recoverable_error });
-                try self.result_handler.receiveResult(ActionResult{ .who = self.site.name, .what = PollingResult.Error });
+                try self.result_handler.dispatch(ActionResult{ .who = self.site.name, .what = PollingResult.Error });
                 return @as(usize, 0);
                 // TODO: dispatch result with error
                 // try self.sendSiteAlert(site, recoverable_error);
@@ -153,7 +166,7 @@ const SiteChecker = struct {
 
         // TODO: dispatch successful result
 
-        try self.result_handler.receiveResult(ActionResult{ .who = self.site.name, .what = PollingResult.Ok });
+        try self.result_handler.dispatch(ActionResult{ .who = self.site.name, .what = PollingResult.Ok });
         print("Polling {s}...Success [RTT {d}ms]\n", .{ self.site.name, duration_in_ms });
 
         return duration_in_ms;

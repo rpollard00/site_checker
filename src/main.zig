@@ -39,6 +39,13 @@ const Config = struct {
 const ActionResult = struct {
     who: []const u8,
     what: PollingResult,
+    msg: []const u8,
+
+    // you must call deinit to deallocate the memory used for the dynamic message string
+    // you also must use dupe() to copy a []const u8 string onto the heap
+    pub fn deinit(self: *ActionResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.msg);
+    }
 };
 
 const Event = struct {
@@ -106,7 +113,7 @@ const Controller = struct {
                 self.cond.wait(&self.mutex);
             }
 
-            const currentResult = self.results.dequeue() catch {
+            var currentResult = self.results.dequeue() catch {
                 continue;
             };
 
@@ -114,7 +121,8 @@ const Controller = struct {
                 continue;
             }
 
-            print("HANDLED: {s}: {}\n", .{ currentResult.?.who, currentResult.?.what });
+            print("HANDLED: {s}: {} -> {s}\n", .{ currentResult.?.who, currentResult.?.what, currentResult.?.msg });
+            currentResult.?.deinit(self.allocator);
         }
     }
 };
@@ -148,15 +156,14 @@ const SiteChecker = struct {
     fn checkSite(self: *SiteChecker) !?u64 {
         const start: u64 = self.timer.read();
 
-        // print("Polling {s}...", .{self.site.name});
-        // errdefer print("\n", .{});
-
         var stream = net.tcpConnectToHost(self.allocator, self.site.name, self.site.port) catch |err| {
-            if (NetworkError.errorClassifier(err)) |_| {
-                // print("Polling {s}...ERROR: {!}\n", .{ self.site.name, recoverable_error });
-                try self.result_handler.dispatch(ActionResult{ .who = self.site.name, .what = PollingResult.Error });
+            if (NetworkError.errorClassifier(err)) |recoverable_error| {
+                try self.result_handler.dispatch(ActionResult{
+                    .who = self.site.name,
+                    .what = PollingResult.Error,
+                    .msg = try self.allocator.dupe(u8, NetworkError.toString(recoverable_error)),
+                });
                 return @as(usize, 0);
-                // try self.sendSiteAlert(site, recoverable_error);
             } else {
                 return err;
             }
@@ -167,8 +174,14 @@ const SiteChecker = struct {
         const now: u64 = self.timer.lap();
         const duration_in_ms: u64 = (now - start) / NS_IN_MS;
 
-        try self.result_handler.dispatch(ActionResult{ .who = self.site.name, .what = PollingResult.Ok });
-        // print("Polling {s}...Success [RTT {d}ms]\n", .{ self.site.name, duration_in_ms });
+        var msg = std.ArrayList(u8).init(self.allocator);
+        try std.fmt.format(msg.writer(), "RTT {d}ms", .{duration_in_ms});
+
+        try self.result_handler.dispatch(ActionResult{
+            .who = self.site.name,
+            .what = PollingResult.Ok,
+            .msg = try self.allocator.dupe(u8, msg.items),
+        });
 
         return duration_in_ms;
     }

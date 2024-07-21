@@ -62,12 +62,12 @@ pub fn Queue(comptime T: type) type {
             self.tail = node;
         }
 
-        pub fn dequeue(self: *Self) !T {
+        pub fn dequeue(self: *Self) !?T {
             self.mutex.lock();
             defer self.mutex.unlock();
 
             if (self.head == null or self.head == undefined) {
-                return error.DequeuedEmptyQueue;
+                return null;
             }
 
             const data = self.head.?.data;
@@ -199,13 +199,13 @@ test "can peek in the queue" {
     try queue.enqueue(4);
     try queue.enqueue(5);
 
-    const peeked_val = try queue.peek();
+    const peeked_val = queue.peek();
 
     try std.testing.expect(peeked_val == 1);
 
     _ = try queue.dequeue();
 
-    const peek_again = try queue.peek();
+    const peek_again = queue.peek();
 
     try std.testing.expect(peek_again == 2);
 }
@@ -256,5 +256,5 @@ test "multiple threads can access the queue" {
     }
 
     try std.testing.expectEqual(0, queue.length);
-    try std.testing.expectError(error.DequeuedEmptyQueue, queue.dequeue());
+    try std.testing.expectEqual(null, queue.dequeue());
 }

@@ -1,20 +1,21 @@
 {
-    "sites": [
-        {
-            "name": "reesep.com",
-            "port": "443",
-            "threshold": "5"
-        },
-        {
-            "name": "tellmewhatyouwant.lol",
-            "port": "443",
-            "threshold": "5"
-        },
-        {
-            "name": "111faketellmewhatyouwant.lol",
-            "port": "443",
-            "threshold": "5"
-        }
-    ],
-    "pollingIntervalMs": "5000"
+  "sites": [
+    {
+      "name": "reesep.com",
+      "port": "443",
+      "threshold": "5",
+      "polling_interval": "1000"
+    },
+    {
+      "name": "tellmewhatyouwant.lol",
+      "port": "443",
+      "threshold": "4200"
+    },
+    {
+      "name": "111faketellmewhatyouwant.lol",
+      "port": "443",
+      "threshold": "5"
+    }
+  ],
+  "pollingIntervalMs": "5000"
 }

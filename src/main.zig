@@ -75,11 +75,12 @@ const Controller = struct {
     cond: std.Thread.Condition,
 
     pub fn init(allocator: std.mem.Allocator) Controller {
+        const mutex = std.Thread.Mutex{};
         return Controller{
             .allocator = allocator,
-            .results = queue.Queue(ActionResult).init(allocator),
+            .results = queue.Queue(ActionResult).init(allocator, mutex),
             .alerter = alerter.AlertListeners.init(allocator),
-            .mutex = std.Thread.Mutex{},
+            .mutex = mutex,
             .cond = std.Thread.Condition{},
         };
     }
@@ -102,16 +103,18 @@ const Controller = struct {
             defer self.mutex.unlock();
 
             while (self.results.peek() == null) {
-                print("Waiting...\n", .{});
                 self.cond.wait(&self.mutex);
             }
 
             const currentResult = self.results.dequeue() catch {
-                print("Too many of these...\n", .{});
                 continue;
             };
 
-            print("HANDLED: {s}: {}\n", .{ currentResult.who, currentResult.what });
+            if (currentResult == null) {
+                continue;
+            }
+
+            print("HANDLED: {s}: {}\n", .{ currentResult.?.who, currentResult.?.what });
         }
     }
 };
@@ -207,7 +210,7 @@ pub fn main() !void {
         try siteCheckers.append(currentSite);
     }
 
-    _ = try std.Thread.spawn(.{}, Controller.resultHandler, .{&controller});
+    const controller_thread = try std.Thread.spawn(.{}, Controller.resultHandler, .{&controller});
 
     try siteCheckers.items[0].poll();
 
@@ -216,8 +219,7 @@ pub fn main() !void {
     // var terminate = std.atomic.Value(bool);
     //
 
-    std.time.sleep(10000 * NS_IN_MS);
-
+    controller_thread.join();
     // const ThreadContext = struct {
     //     queue: *Queue(u32),
     //     start_value: u32,

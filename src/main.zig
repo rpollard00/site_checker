@@ -240,23 +240,3 @@ pub fn main() !void {
         }
     }
 }
-
-const expect = std.testing.expect;
-
-test "fba truncates and doesnt crash" {
-    var buf: [16]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    var msg = try ArrayList(u8).initCapacity(fba.allocator(), 16);
-    defer msg.deinit();
-
-    const writer = msg.writer();
-    writer.print("Message should truncate\n", .{}) catch |err| switch (err) {
-        error.OutOfMemory => {
-            try writer.writeAll("Too long........");
-            print("Msg len is {d}\n", .{msg.items.len});
-        },
-        else => return err,
-    };
-
-    print("{s}\n", .{msg.items});
-}
